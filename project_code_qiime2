@@ -1,0 +1,405 @@
+# Make directories
+mkdir BMS_690
+cd BMS_690
+mkdir raw_reads
+cd raw_reads
+
+# Use SRA toolkit to dump FASTQ files
+
+cat sra_id.txt | while read sra_id; do prefetch $sra_id; fasterq-dump $sra_id; gzip ${sra_id}*.fastq;done
+
+cd ../
+echo sample-id$'\t'forward-absolute-filepath$'\t'reverse-absolute-filepath > q2_manifest.tsv
+cat sra_id.txt | while read sra_id; do echo $sra_id$'\t'$PWD/raw_reads/${sra_id}_1.fastq.gz$'\t'$PWD/raw_reads/${sra_id}_2.fastq.gz >> q2_manifest.tsv; done
+
+qiime tools import \
+--type 'SampleData[PairedEndSequencesWithQuality]' \
+--input-path q2_manifest.tsv \
+--output-path demux_seqs.qza \
+--input-format PairedEndFastqManifestPhred33V2
+
+#Generate a quality summary
+qiime demux summarize \
+  --i-data demux_seqs.qza \
+  --o-visualization demux_seqs.qzv
+
+# Tabulate metadata
+qiime metadata tabulate \
+  --m-input-file blym_metadata.tsv \
+  --o-visualization blym_metadata.qzv
+
+# Perform FASTQC on all reads
+module load fastqc/0.12.1
+ls *fastq.gz
+sinteractive -A <project-code>
+fastqc *.fastq.gz
+
+# Run MultiQC
+module load miniconda3
+conda create -n mutliqc --file mutliqc_env.yml
+conda activate mutliqc
+multiqc *fastqc.zip
+
+# Run DADA2 and trim after reviewing the quality plots
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs demux_seqs.qza \
+  --p-trim-left-f 0 \
+  --p-trim-left-r 0 \
+  --p-trunc-len-f 250 \
+  --p-trunc-len-r 250 \
+  --o-representative-sequences rep-seqs-dada2.qza \
+  --o-table table-dada2.qza \
+  --o-denoising-stats stats-dada2.qza
+
+  qiime metadata tabulate \
+  --m-input-file ./dada2_stats.qza  \
+  --o-visualization ./dada2_stats.qzv
+
+# Feature table summary
+qiime feature-table summarize \
+  --i-table ./table.qza \
+  --m-sample-metadata-file ./blym_metadata.tsv \
+  --o-visualization ./table.qzv
+
+# Generate a phylogenetic tree
+wget https://data.qiime2.org/classifiers/sepp-ref-dbs/sepp-refs-silva-128.qza
+
+qiime fragment-insertion sepp \
+  --i-representative-sequences ./rep-seqs.qza \
+  --i-reference-database sepp-refs-silva-128.qza \
+  --o-tree ./tree.qza \
+  --o-placements ./tree_placements.qza \
+  --p-threads 2
+
+  #Select a rarefaction depth
+  qiime diversity alpha-rarefaction \
+  --i-table ./table.qza \
+  --m-metadata-file ./blym_metadata.tsv \
+  --o-visualization ./alpha_rarefaction_curves.qzv \
+  --p-min-depth 44000 \
+  --p-max-depth 140000
+
+  # Diversity analysis using core-metrics-phylognetic
+  #This step rarefies the feature table to a depth of 44000
+  #This step will also generate a phylogenetic tree and create several other diveristy metrics and plots (mainly beta diversity)
+
+  qiime diversity core-metrics-phylogenetic \
+  --i-table ./table.qza \
+  --i-phylogeny ./tree.qza \
+  --m-metadata-file ./blym_metadata.tsv \
+  --p-sampling-depth 44000 \
+  --output-dir ./core-metrics-results
+
+
+# Generate Alpha Diversity Metrics and Plots
+
+#Export shannon vector for use in R studio for kurtosis analysis
+qiime tools export \
+  --input-path shannon_vector.qza \
+  --output-path exported-shannon
+
+#Faith's Phylogenetic Diversity
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity ./core-metrics-results/faith_pd_vector.qza \
+  --m-metadata-file ./blym_metadata.tsv \
+  --o-visualization ./core-metrics-results/faiths_pd_statistics.qzv
+
+#Evenness
+qiime diversity alpha-group-significance \
+ --i-alpha-diversity ./core-metrics-results/evenness_vector.qza \
+ --m-metadata-file ./blym_metadata.tsv \
+ --o-visualization ./core-metrics-results/evenness_statistics.qzv
+
+ #Faith's PD Anova
+qiime longitudinal anova \
+  --m-metadata-file ./core-metrics-results/faith_pd_vector.qza \
+  --m-metadata-file ./blym_metadata.tsv \
+  --p-formula 'faith_pd ~ group' \
+  --o-visualization ./core-metrics-results/faiths_pd_anova.qzv
+
+#Shannon's Diversity
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity ./core-metrics-results/shannon_vector.qza \
+  --m-metadata-file ./blym_metadata.tsv \
+  --o-visualization ./core-metrics-results/shannon_group_significance.qzv
+
+#Observed Diversity
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity ./core-metrics-results/observed_features_vector.qza \
+  --m-metadata-file ./blym_metadata.tsv \
+  --o-visualization ./core-metrics-results/observed_group_significance.qzv
+
+#Simpson Diversity
+qiime diversity alpha \
+  --i-table table.qza \
+  --p-metric simpson \
+  --o-alpha-diversity simpson_vector.qza
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity simpson_vector.qza \
+  --m-metadata-file blym_metadata.tsv \
+  --o-visualization simpson_group_significance.qzv
+
+#Chao1 Diversity
+qiime diversity alpha \
+  --i-table table.qza \
+  --p-metric chao1 \
+  --o-alpha-diversity chao1_vector.qza
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity chao1_vector.qza \
+  --m-metadata-file blym_metadata.tsv \
+  --o-visualization chao1_group_significance.qzv
+
+# Generate More Beta Diversity Metrics and Plots
+
+#Unweighted Unifrac
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file blym_metadata.tsv \
+  --m-metadata-column group \
+  --o-visualization core-metrics-results/unweighted-unifrac-donor-significance.qzv
+
+#Weighted Unifrac
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file blym_metadata.tsv \
+  --m-metadata-column group \
+  --o-visualization core-metrics-results/weighted-unifrac-donor-significance.qzv
+
+#Bray Curtis
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results/bray_curtis_distance_matrix.qza \
+  --m-metadata-file blym_metadata.tsv \
+  --m-metadata-column group \
+  --o-visualization core-metrics-results/bray-curtis-group-significance.qzv
+
+qiime emperor plot \
+  --i-pcoa core-metrics-results/bray_curtis_pcoa_results.qza \
+  --m-metadata-file blym_metadata.tsv \
+  --o-visualization bray_curtis_pcoa_visualization.qzv
+
+
+
+#Jaccard
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results/jaccard_distance_matrix.qza \
+  --m-metadata-file blym_metadata.tsv \
+  --m-metadata-column group \
+  --o-visualization core-metrics-results/jaccard-group-significance.qzv
+
+#Adonis test unweighted unifrac
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file blym_metadata.tsv \
+  --p-formula group \
+  --o-visualization core-metrics-results/unweighted_adonis_group.qzv
+
+#Taxonomic Classification
+
+# Download SILVA 138 99% reference sequences
+wget https://data.qiime2.org/2023.9/common/silva-138-99-seqs.qza
+
+# Download SILVA 138 99% taxonomy
+wget https://data.qiime2.org/2023.9/common/silva-138-99-tax.qza
+
+#Extract reference reads based on the primers used
+qiime feature-classifier extract-reads \
+  --i-sequences silva_138_99_otus.qza \
+  --p-f-primer CCTACGGGNGGCWGCAG \
+  --p-r-primer GACTACHVGGGTATCTAATCC \
+  --p-trunc-len 0 \
+  --o-reads silva-338F-806R-ref-seqs.qza
+
+#Train the classifier
+qiime feature-classifier fit-classifier-naive-bayes \
+  --i-reference-reads silva-338F-806R-ref-seqs.qza \
+  --i-reference-taxonomy silva_138_99_taxonomy.qza \
+  --o-classifier silva-338F-806R-classifier.qza
+
+
+#Create taxonomy
+qiime feature-classifier classify-sklearn \
+  --i-reads ./rep-seqs.qza \
+  --i-classifier ./silva-338F-806R-classifier.qza \
+  --o-classification ./taxonomy.qza
+
+#Visualize taxonomy
+qiime metadata tabulate \
+  --m-input-file ./taxonomy.qza \
+  --o-visualization ./taxonomy.qzv
+
+#Tabulate representative sequences
+qiime feature-table tabulate-seqs \
+  --i-data ./rep-seqs.qza \
+  --o-visualization ./rep-seqs.qzv
+
+#Taxonomy Barchart
+qiime feature-table filter-samples \
+  --i-table ./table.qza \
+  --p-min-frequency 44000 \
+  --o-filtered-table ./table_2k.qza
+
+qiime taxa barplot \
+  --i-table ./table_2k.qza \
+  --i-taxonomy ./taxonomy.qza \
+  --m-metadata-file ./blym_metadata.tsv \
+  --o-visualization ./taxa_barplot.qzv
+
+# Export Taxonomic Classification 
+qiime tools export \
+  --input-path taxonomy.qza \
+  --output-path exported-taxonomy
+
+# Export Feature Table
+qiime tools export \
+  --input-path table_2k.qza \
+  --output-path exported-feature-table
+
+#Table
+  qiime feature-table summarize \
+  --i-table table_2k.qza \
+  --o-visualization feature-table-summary.qzv
+
+#Convert feature table to composition format
+qiime composition add-pseudocount \
+  --i-table table_2k.qza \
+  --o-composition-table feature-table-composition.qza
+
+
+#Differential Abundance ANCOM
+qiime composition ancom \
+  --i-table feature-table-composition.qza \
+  --m-metadata-file blym_metadata.tsv \
+  --m-metadata-column group \
+  --o-visualization ancom_results.qzv
+
+#ACOM for Genus
+qiime taxa collapse \
+  --i-table table_2k.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-level 6 \
+  --o-collapsed-table table-genus.qza
+
+qiime composition add-pseudocount \
+  --i-table table-genus.qza \
+  --o-composition-table comp-table-genus.qza
+
+qiime composition ancom \
+  --i-table comp-table-genus.qza \
+  --m-metadata-file blym_metadata.tsv \
+  --m-metadata-column group \
+  --o-visualization ancom-genus.qzv
+
+  #ACOM for Family
+  qiime taxa collapse \
+  --i-table table_2k.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-level 5 \
+  --o-collapsed-table table-family.qza
+
+qiime composition add-pseudocount \
+  --i-table table-family.qza \
+  --o-composition-table comp-table-family.qza
+
+qiime composition ancom \
+  --i-table comp-table-family.qza \
+  --m-metadata-file blym_metadata.tsv \
+  --m-metadata-column group \
+  --o-visualization ancom-family.qzv
+
+#ACOM for Order
+ qiime taxa collapse \
+  --i-table table_2k.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-level 4 \
+  --o-collapsed-table table-order.qza
+
+qiime composition add-pseudocount \
+  --i-table table-order.qza \
+  --o-composition-table comp-table-order.qza
+
+qiime composition ancom \
+  --i-table comp-table-order.qza \
+  --m-metadata-file blym_metadata.tsv \
+  --m-metadata-column group \
+  --o-visualization ancom-order.qzv
+
+  #ACOM for Class
+   qiime taxa collapse \
+  --i-table table_2k.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-level 3 \
+  --o-collapsed-table table-class.qza
+
+qiime composition add-pseudocount \
+  --i-table table-class.qza \
+  --o-composition-table comp-table-class.qza
+
+qiime composition ancom \
+  --i-table comp-table-class.qza \
+  --m-metadata-file blym_metadata.tsv \
+  --m-metadata-column group \
+  --o-visualization ancom-class.qzv
+
+  #ACOM for Phylum
+   qiime taxa collapse \
+  --i-table table_2k.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-level 2 \
+  --o-collapsed-table table-phylum.qza
+
+qiime composition add-pseudocount \
+  --i-table table-phylum.qza \
+  --o-composition-table comp-table-phylum.qza
+
+qiime composition ancom \
+  --i-table comp-table-phylum.qza \
+  --m-metadata-file blym_metadata.tsv \
+  --m-metadata-column group \
+  --o-visualization ancom-phylum.qzv
+
+# Export to R for Visuals
+qiime tools export \
+  --input-path core-metrics-results/shannon_vector.qza \
+  --output-path exported_shannon
+
+qiime tools export \
+  --input-path chao1_vector.qza \
+  --output-path exported_chao1
+
+mv exported_chao1/alpha-diversity.tsv chao1.tsv
+
+qiime tools export \
+  --input-path simpson_vector.qza \
+  --output-path exported_simpson
+
+mv exported_simpson/alpha-diversity.tsv simpson.tsv
+
+qiime tools export \
+  --input-path core-metrics-results/observed_features_vector.qza \
+  --output-path exported_observed
+
+mv exported_observed/alpha-diversity.tsv observed.tsv
+
+qiime tools export \
+  --input-path core-metrics-results/faith_pd_vector.qza \
+  --output-path exported_faith
+
+mv exported_faith/alpha-diversity.tsv faith.tsv
+
+qiime tools export \
+  --input-path core-metrics-results/bray_curtis_distance_matrix.qza \
+  --output-path exported_bray_curtis
+
+mv exported_bray_curtis/distance-matrix.tsv bray_curtis.tsv
+
+qiime tools export \
+  --input-path core-metrics-results/unweighted_unifrac_distance_matrix.qza \
+  --output-path exported_unweighted_unifrac
+
+mv exported_unweighted_unifrac/distance-matrix.tsv unweighted_unifrac.tsv
+
+
+
+
