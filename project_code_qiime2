@@ -1,6 +1,6 @@
 # Make directories
-mkdir BMS_690
-cd BMS_690
+mkdir DLBCL
+cd DLBCL
 mkdir raw_reads
 cd raw_reads
 
